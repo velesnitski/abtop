@@ -77,15 +77,18 @@ fn print_snapshot(app: &App) {
             model::SessionStatus::Error(_) => "✗ Err",
             model::SessionStatus::Done => "✓ Done",
         };
-        let display_name = if session.initial_prompt.is_empty() {
-            session.project_name.clone()
+        let sid_short = if session.session_id.len() >= 7 {
+            &session.session_id[..7]
         } else {
-            session.initial_prompt.clone()
+            &session.session_id
         };
+        let project_label = format!("{}({})", session.project_name, sid_short);
+        let summary = if session.initial_prompt.is_empty() { "—" } else { &session.initial_prompt };
         println!(
-            "  {} {:<14} {} {:<10} CTX:{:>3.0}% Tok:{} Mem:{}M {}",
+            "  {} {:<20} {} {} {:<10} CTX:{:>3.0}% Tok:{} Mem:{}M {}",
             session.pid,
-            display_name,
+            project_label,
+            summary,
             status,
             session.model.replace("claude-", ""),
             session.context_percent,

@@ -767,29 +767,29 @@ fn draw_sessions_panel(f: &mut Frame, app: &App, area: Rect) {
         .add_modifier(Modifier::BOLD);
     let header = Row::new(vec![
         Cell::from(""),
-        Cell::from(Span::styled("Pid:", header_style)),
-        Cell::from(Span::styled("Sess:", header_style)),
-        Cell::from(Span::styled("Session:", header_style)),
-        Cell::from(Span::styled("Status:", header_style)),
-        Cell::from(Span::styled("Model:", header_style)),
-        Cell::from(Span::styled("Context", header_style)),
-        Cell::from(Span::styled("Tokens:", header_style)),
-        Cell::from(Span::styled("Mem:", header_style)),
+        Cell::from(Span::styled("Pid", header_style)),
+        Cell::from(Span::styled("Project", header_style)),
+        Cell::from(Span::styled("Summary", header_style)),
+        Cell::from(Span::styled("Status", header_style)),
+        Cell::from(Span::styled("Model", header_style)),
+        Cell::from(Span::styled("CTX", header_style)),
+        Cell::from(Span::styled("Tokens", header_style)),
+        Cell::from(Span::styled("Mem", header_style)),
         Cell::from(Span::styled("Turn", header_style)),
     ])
     .height(1);
 
     let widths = [
-        Constraint::Length(1),
-        Constraint::Length(6),
-        Constraint::Length(8),
-        Constraint::Min(12),
-        Constraint::Length(6),
-        Constraint::Length(8),
-        Constraint::Length(7),
-        Constraint::Length(7),
-        Constraint::Length(5),
-        Constraint::Length(4),
+        Constraint::Length(1),   // marker
+        Constraint::Length(6),   // pid
+        Constraint::Length(18),  // project(session_id)
+        Constraint::Min(12),     // summary (gets remaining space)
+        Constraint::Length(6),   // status
+        Constraint::Length(6),   // model
+        Constraint::Length(5),   // ctx
+        Constraint::Length(7),   // tokens
+        Constraint::Length(5),   // mem
+        Constraint::Length(4),   // turn
     ];
 
     let table = Table::new(rows, widths).header(header);
