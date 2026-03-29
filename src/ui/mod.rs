@@ -245,14 +245,27 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
 // ── top panel: rate limit + context ──────────────────────────────────────────
 
 fn draw_top_panel(f: &mut Frame, app: &App, area: Rect) {
-    let chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
-        .split(area);
-
     let cpu_grad = make_gradient(CPU_START, CPU_MID, CPU_END);
 
-    // Rate limit (left)
+    // Single unified box for the entire top panel
+    let block = btop_block("rate limit + context", "¹", CPU_BOX);
+    f.render_widget(block, area);
+
+    // Calculate inner area (inside borders)
+    let inner = Rect {
+        x: area.x + 1,
+        y: area.y + 1,
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(2),
+    };
+
+    // Split inner area: left 40% for rate limit, right 60% for context
+    let inner_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+        .split(inner);
+
+    // Rate limit (left side, no borders)
     let rl_text = vec![
         Line::from(""),
         Line::from(vec![
@@ -265,21 +278,27 @@ fn draw_top_panel(f: &mut Frame, app: &App, area: Rect) {
         ]),
         Line::from(""),
     ];
-    let rl_block = btop_block("rate limit", "¹", CPU_BOX);
-    f.render_widget(Paragraph::new(rl_text).block(rl_block), chunks[0]);
+    f.render_widget(Paragraph::new(rl_text), inner_chunks[0]);
 
-    // Context bars (right) — uses cpu gradient like btop CPU meters
-    let inner_w = (chunks[1].width as usize).saturating_sub(18); // padding for label + pct
+    // Context bars (right side, no borders)
+    let inner_w = (inner_chunks[1].width as usize).saturating_sub(18);
     let bar_width = inner_w.min(25).max(8);
 
     let mut lines: Vec<Line> = Vec::new();
-    for session in &app.sessions {
+
+    // "SESSION CONTEXT" header
+    lines.push(Line::from(Span::styled(
+        " SESSION CONTEXT",
+        Style::default().fg(TITLE).add_modifier(Modifier::BOLD),
+    )));
+
+    for (i, session) in app.sessions.iter().enumerate() {
         let pct = session.context_percent.min(100.0);
         let warn = if pct >= 90.0 { " ⚠" } else { "" };
         let pct_color = grad_at(&cpu_grad, pct);
 
         let mut spans = vec![Span::styled(
-            format!(" {:<10}", truncate_str(&session.project_name, 10)),
+            format!(" S{} {:<10}", i + 1, truncate_str(&session.project_name, 10)),
             Style::default().fg(MAIN_FG),
         )];
         spans.extend(meter_bar(pct, bar_width, &cpu_grad));
@@ -289,7 +308,7 @@ fn draw_top_panel(f: &mut Frame, app: &App, area: Rect) {
         ));
         lines.push(Line::from(spans));
     }
-    if lines.is_empty() {
+    if app.sessions.is_empty() {
         lines.push(Line::from(Span::styled(
             "  no active sessions",
             Style::default().fg(INACTIVE_FG),
@@ -302,8 +321,7 @@ fn draw_top_panel(f: &mut Frame, app: &App, area: Rect) {
         Style::default().fg(GRAPH_TEXT),
     )));
 
-    let ctx_block = btop_block("context", "", CPU_BOX);
-    f.render_widget(Paragraph::new(lines).block(ctx_block), chunks[1]);
+    f.render_widget(Paragraph::new(lines), inner_chunks[1]);
 }
 
 // ── tokens panel — maps to btop's ²mem panel ────────────────────────────────
@@ -352,7 +370,7 @@ fn draw_tokens_panel(f: &mut Frame, app: &App, area: Rect) {
         Style::default().fg(grad_at(&free_grad, 80.0)),
     ));
 
-    let mut output_line = vec![styled_label(" Out:   ")];
+    let mut output_line = vec![styled_label(" Output: ")];
     output_line.extend(meter_bar(out_pct, bar_w, &used_grad));
     output_line.push(Span::styled(
         format!(" {}", fmt_tokens(total_out)),
@@ -490,7 +508,13 @@ fn draw_ports_panel(f: &mut Frame, app: &App, area: Rect) {
 
     let proc_grad = make_gradient(PROC_START, PROC_MID, PROC_END);
 
-    let mut lines = Vec::new();
+    let header_style = Style::default().fg(MAIN_FG).add_modifier(Modifier::BOLD);
+    let mut lines = vec![Line::from(vec![
+        Span::styled(" PORT  ", header_style),
+        Span::styled("SESSION    ", header_style),
+        Span::styled("CMD      ", header_style),
+        Span::styled("PID", header_style),
+    ])];
     for (port, proj, cmd, pid) in &all_ports {
         let conflict = port_counts.get(port).copied().unwrap_or(0) > 1;
         let color = if conflict {
@@ -513,7 +537,7 @@ fn draw_ports_panel(f: &mut Frame, app: &App, area: Rect) {
         ]));
     }
 
-    if lines.is_empty() {
+    if lines.len() <= 1 {
         lines.push(Line::from(Span::styled(
             " no open ports",
             Style::default().fg(INACTIVE_FG),
@@ -628,7 +652,7 @@ fn draw_sessions_panel(f: &mut Frame, app: &App, area: Rect) {
                     Cell::from(""),
                     Cell::from(""),
                     Cell::from(Span::styled(
-                        format!("CHILDREN ({})", session.project_name),
+                        format!("CHILDREN (►{} · {})", session.pid, session.project_name),
                         Style::default()
                             .fg(TITLE)
                             .add_modifier(Modifier::BOLD),
