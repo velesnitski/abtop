@@ -984,6 +984,7 @@ fn draw_sessions_panel(f: &mut Frame, app: &App, area: Rect) {
     // Responsive widths — all 9 core columns always visible, widths adapt
     let project_w: u16 = if w >= 120 { 14 } else if w >= 100 { 10 } else { 7 };
     let session_w: u16 = if w >= 110 { 9 } else { 5 };
+    let session_label = if w >= 110 { "Session" } else { "Sess" };
     let status_w: u16 = if w >= 100 { 8 } else { 6 };
     let model_w: u16 = if w >= 110 { 8 } else { 6 };
     let context_w: u16 = if w >= 100 { 7 } else { 5 };
@@ -1119,7 +1120,7 @@ fn draw_sessions_panel(f: &mut Frame, app: &App, area: Rect) {
     }
     header_cells.extend([
         Cell::from(Span::styled("Project", header_style)),
-        Cell::from(Span::styled("Sess", header_style)),
+        Cell::from(Span::styled(session_label, header_style)),
         Cell::from(Span::styled("Summary", header_style)),
         Cell::from(Span::styled("Status", header_style)),
         Cell::from(Span::styled("Model", header_style)),
