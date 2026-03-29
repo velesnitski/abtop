@@ -196,8 +196,8 @@ pub fn draw(f: &mut Frame, app: &App) {
     let mid = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Percentage(35), // left panels
-            Constraint::Percentage(65), // sessions
+            Constraint::Percentage(28), // left panels
+            Constraint::Percentage(72), // sessions
         ])
         .split(chunks[2]);
 
