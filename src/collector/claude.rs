@@ -4,14 +4,17 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 pub struct ClaudeCollector {
     sessions_dir: PathBuf,
     projects_dir: PathBuf,
-    #[allow(dead_code)]
-    offsets: HashMap<String, u64>,
+    /// Cached transcript parse results keyed by session_id.
+    /// On each tick, only new bytes since `new_offset` are parsed.
+    transcript_cache: HashMap<String, TranscriptResult>,
 }
 
 impl ClaudeCollector {
@@ -20,7 +23,7 @@ impl ClaudeCollector {
         Self {
             sessions_dir: home.join(".claude").join("sessions"),
             projects_dir: home.join(".claude").join("projects"),
-            offsets: HashMap::new(),
+            transcript_cache: HashMap::new(),
         }
     }
 
@@ -42,6 +45,11 @@ impl ClaudeCollector {
             }
         }
 
+        // Evict transcript cache for sessions that no longer exist
+        let active_ids: std::collections::HashSet<&str> =
+            sessions.iter().map(|s| s.session_id.as_str()).collect();
+        self.transcript_cache.retain(|sid, _| active_ids.contains(sid.as_str()));
+
         sessions.sort_by_key(|s| std::cmp::Reverse(s.started_at));
         sessions
     }
@@ -56,9 +64,17 @@ impl ClaudeCollector {
         let content = fs::read_to_string(path).ok()?;
         let sf: SessionFile = serde_json::from_str(&content).ok()?;
 
-        let pid_alive = process_info.get(&sf.pid)
-            .map(|p| p.command.contains("/claude") && p.command.contains("--session-id"))
+        let proc_cmd = process_info.get(&sf.pid).map(|p| p.command.as_str());
+        let pid_alive = proc_cmd
+            .map(|c| c.contains("/claude") && c.contains("--session-id"))
             .unwrap_or(false);
+
+        // Skip --print sessions (e.g. abtop's own summary generation).
+        // Only filter while process is alive (command visible); dead sessions
+        // are cleaned up when the session file disappears.
+        if proc_cmd.map(|c| c.contains("--print")).unwrap_or(false) {
+            return None;
+        }
 
         let project_name = sf
             .cwd
@@ -72,40 +88,88 @@ impl ClaudeCollector {
 
         let transcript_path = self.find_transcript(&sf.cwd, &sf.session_id);
 
-        let mut model = String::from("-");
-        let mut total_input = 0u64;
-        let mut total_output = 0u64;
-        let mut total_cache_read = 0u64;
-        let mut total_cache_create = 0u64;
-        let mut last_context_tokens = 0u64;
-        let mut turn_count = 0u32;
-        let mut current_task = String::new();
-        let mut version = String::new();
-        let mut git_branch = String::new();
-        let mut last_activity = std::time::UNIX_EPOCH;
-        let mut token_history = Vec::new();
-        let mut initial_prompt = String::new();
-
         if let Some(ref tp) = transcript_path {
-            // Always parse from beginning to get correct cumulative totals.
-            // Incremental parsing requires carrying forward previous totals,
-            // which is v0.2 optimization scope.
-            let result = parse_transcript(tp, 0);
+            let cached = self.transcript_cache.remove(&sf.session_id);
+            // Detect file replacement: if inode or mtime changed, reparse from scratch
+            let identity_changed = cached.as_ref()
+                .map(|c| c.file_identity != file_identity(tp))
+                .unwrap_or(false);
+            let from_offset = if identity_changed {
+                0
+            } else {
+                cached.as_ref().map(|c| c.new_offset).unwrap_or(0)
+            };
 
-            model = result.model;
-            total_input = result.total_input;
-            total_output = result.total_output;
-            total_cache_read = result.total_cache_read;
-            total_cache_create = result.total_cache_create;
-            last_context_tokens = result.last_context_tokens;
-            turn_count = result.turn_count;
-            current_task = result.current_task;
-            version = result.version;
-            git_branch = result.git_branch;
-            last_activity = result.last_activity;
-            token_history = result.token_history;
-            initial_prompt = result.initial_prompt;
+            let delta = parse_transcript(tp, from_offset);
+
+            if let Some(mut prev) = cached {
+                // File replaced, shrank, or first parse — replace entirely
+                if identity_changed || from_offset == 0 || delta.new_offset < from_offset {
+                    self.transcript_cache.insert(sf.session_id.clone(), delta);
+                } else {
+                    // Merge delta into cached result
+                    if delta.model != "-" {
+                        prev.model = delta.model;
+                    }
+                    prev.total_input += delta.total_input;
+                    prev.total_output += delta.total_output;
+                    prev.total_cache_read += delta.total_cache_read;
+                    prev.total_cache_create += delta.total_cache_create;
+                    if delta.last_context_tokens > 0 {
+                        prev.last_context_tokens = delta.last_context_tokens;
+                    }
+                    prev.turn_count += delta.turn_count;
+                    // Always update current_task from delta — empty means
+                    // latest assistant turn had no tool_use (task cleared)
+                    if delta.turn_count > 0 {
+                        prev.current_task = delta.current_task;
+                    }
+                    if !delta.version.is_empty() {
+                        prev.version = delta.version;
+                    }
+                    if !delta.git_branch.is_empty() {
+                        prev.git_branch = delta.git_branch;
+                    }
+                    if delta.last_activity > prev.last_activity {
+                        prev.last_activity = delta.last_activity;
+                    }
+                    prev.token_history.extend(delta.token_history);
+                    if prev.initial_prompt.is_empty() && !delta.initial_prompt.is_empty() {
+                        prev.initial_prompt = delta.initial_prompt;
+                    }
+                    prev.new_offset = delta.new_offset;
+                    self.transcript_cache.insert(sf.session_id.clone(), prev);
+                }
+            } else {
+                // First parse — store full result
+                self.transcript_cache.insert(sf.session_id.clone(), delta);
+            }
         }
+
+        let empty_result = TranscriptResult {
+            model: "-".to_string(),
+            total_input: 0, total_output: 0, total_cache_read: 0, total_cache_create: 0,
+            last_context_tokens: 0, turn_count: 0, current_task: String::new(),
+            version: String::new(), git_branch: String::new(),
+            last_activity: std::time::UNIX_EPOCH, new_offset: 0,
+            file_identity: (0, 0),
+            token_history: Vec::new(), initial_prompt: String::new(),
+        };
+        let cached = self.transcript_cache.get(&sf.session_id).unwrap_or(&empty_result);
+
+        let model = cached.model.clone();
+        let total_input = cached.total_input;
+        let total_output = cached.total_output;
+        let total_cache_read = cached.total_cache_read;
+        let total_cache_create = cached.total_cache_create;
+        let last_context_tokens = cached.last_context_tokens;
+        let turn_count = cached.turn_count;
+        let current_task = cached.current_task.clone();
+        let version = cached.version.clone();
+        let git_branch = cached.git_branch.clone();
+        let last_activity = cached.last_activity;
+        let token_history = cached.token_history.clone();
+        let initial_prompt = cached.initial_prompt.clone();
 
         let status = if !pid_alive {
             SessionStatus::Done
@@ -164,8 +228,8 @@ impl ClaudeCollector {
             }
         }
 
-        // Git stats: added and modified file counts
-        let (git_added, git_modified) = process::collect_git_stats(&sf.cwd);
+        // Git stats: populated by MultiCollector on slow ticks
+        let (git_added, git_modified) = (0, 0);
 
         // Subagent discovery
         let encoded_path = sf.cwd.replace('/', "-");
@@ -346,11 +410,31 @@ struct TranscriptResult {
     git_branch: String,
     last_activity: std::time::SystemTime,
     new_offset: u64,
+    /// File identity: (inode, mtime_ns). Used to detect file replacement
+    /// even when the new file is the same size or larger.
+    file_identity: (u64, u64),
     token_history: Vec<u64>,
     initial_prompt: String,
 }
 
+/// Get file identity as (inode, mtime_nanos) for detecting file replacement.
+fn file_identity(path: &Path) -> (u64, u64) {
+    fs::metadata(path)
+        .ok()
+        .map(|m| {
+            let ino = m.ino();
+            let mtime_ns = m.modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0);
+            (ino, mtime_ns)
+        })
+        .unwrap_or((0, 0))
+}
+
 fn parse_transcript(path: &Path, from_offset: u64) -> TranscriptResult {
+    let identity = file_identity(path);
     let mut result = TranscriptResult {
         model: "-".to_string(),
         total_input: 0,
@@ -364,6 +448,7 @@ fn parse_transcript(path: &Path, from_offset: u64) -> TranscriptResult {
         git_branch: String::new(),
         last_activity: std::time::UNIX_EPOCH,
         new_offset: from_offset,
+        file_identity: identity,
         token_history: Vec::new(),
         initial_prompt: String::new(),
     };
@@ -374,10 +459,14 @@ fn parse_transcript(path: &Path, from_offset: u64) -> TranscriptResult {
     };
 
     let file_len = file.metadata().map(|m| m.len()).unwrap_or(0);
-    if file_len <= from_offset {
+    if file_len == from_offset {
+        // No new data
         result.new_offset = file_len;
         return result;
     }
+    // File shrank (truncation/rotation) — reset and reparse from start
+    let effective_offset = if file_len < from_offset { 0 } else { from_offset };
+    let from_offset = effective_offset;
 
     let mut reader = BufReader::new(file);
     if from_offset > 0 {
@@ -397,12 +486,31 @@ fn parse_transcript(path: &Path, from_offset: u64) -> TranscriptResult {
         match reader.read_line(&mut line_buf) {
             Ok(0) => break,
             Ok(n) => {
-                bytes_read += n as u64;
+                let has_newline = line_buf.ends_with('\n');
                 let line = line_buf.trim();
                 if line.is_empty() {
+                    if has_newline {
+                        bytes_read += n as u64;
+                    }
                     continue;
                 }
-                if let Ok(val) = serde_json::from_str::<Value>(line) {
+                // Try to parse as JSON. If incomplete (no newline) and
+                // parse fails, defer to next poll. If parse succeeds,
+                // accept the record even without trailing newline.
+                let val = match serde_json::from_str::<Value>(line) {
+                    Ok(v) => v,
+                    Err(_) => {
+                        if has_newline {
+                            // Complete line but invalid JSON — skip it
+                            bytes_read += n as u64;
+                        }
+                        // Incomplete line with parse error — defer
+                        if !has_newline { break; }
+                        continue;
+                    }
+                };
+                bytes_read += n as u64;
+                {
                     match val.get("type").and_then(|t| t.as_str()) {
                         Some("assistant") => {
                             result.turn_count += 1;
@@ -507,6 +615,10 @@ fn extract_prompt_text(message: &Value) -> String {
 
     let clean = result.trim().to_string();
     if clean.is_empty() {
+        return String::new();
+    }
+    // Skip prompts generated by abtop's own summary generation (claude --print)
+    if clean.contains("You are a conversation title generator") {
         return String::new();
     }
     truncate(&clean, 50)

@@ -38,7 +38,8 @@ pub fn read_rate_limits() -> Vec<RateLimitInfo> {
         }
     }
 
-    // Codex: planned for v0.2 (reads from rollout JSONL, different schema)
+    // Codex: rate limits are parsed from JSONL token_count events by CodexCollector
+    // and merged in App::tick(). No file-based reading needed here.
 
     results
 }

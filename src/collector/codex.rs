@@ -1,5 +1,5 @@
 use super::process::{self, ProcInfo};
-use crate::model::{AgentSession, ChildProcess, SessionStatus};
+use crate::model::{AgentSession, ChildProcess, RateLimitInfo, SessionStatus};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fs;
@@ -21,6 +21,8 @@ use std::process::Command;
 /// - `turn_context`: model, cwd, effort, context window size
 pub struct CodexCollector {
     sessions_dir: PathBuf,
+    /// Latest rate limit info parsed from Codex JSONL token_count events.
+    pub last_rate_limit: Option<RateLimitInfo>,
 }
 
 impl CodexCollector {
@@ -28,16 +30,21 @@ impl CodexCollector {
         let home = dirs::home_dir().unwrap_or_default();
         Self {
             sessions_dir: home.join(".codex").join("sessions"),
+            last_rate_limit: None,
         }
     }
 
     pub fn collect(&mut self, shared: &super::SharedProcessData) -> Vec<AgentSession> {
         if !self.sessions_dir.exists() {
+            self.last_rate_limit = None;
             return vec![];
         }
 
-        // Step 1: Find running codex processes and map to JSONL files
-        let codex_pids = Self::find_codex_pids();
+        // Reset rate limit each pass — only keep it if a current session provides one
+        self.last_rate_limit = None;
+
+        // Step 1: Find running codex processes from shared ps data (no extra ps call)
+        let codex_pids = Self::find_codex_pids_from_shared(&shared.process_info);
         let just_pids: Vec<u32> = codex_pids.iter().map(|(p, _)| *p).collect();
         let pid_to_jsonl = Self::map_pid_to_jsonl(&just_pids);
         let pid_is_exec: HashMap<u32, bool> = codex_pids.into_iter().collect();
@@ -48,7 +55,7 @@ impl CodexCollector {
         // Active sessions: running codex processes with open JSONL files
         for (pid, jsonl_path) in &pid_to_jsonl {
             let is_exec = pid_is_exec.get(pid).copied().unwrap_or(false);
-            if let Some(session) = self.load_session(
+            if let Some((session, rl)) = self.load_session_with_rate_limit(
                 Some(*pid),
                 is_exec,
                 jsonl_path,
@@ -57,6 +64,11 @@ impl CodexCollector {
                 &shared.ports,
             ) {
                 seen_jsonl.insert(jsonl_path.clone());
+                if let Some(new_rl) = rl {
+                    let newer = self.last_rate_limit.as_ref()
+                        .map_or(true, |old| new_rl.updated_at > old.updated_at);
+                    if newer { self.last_rate_limit = Some(new_rl); }
+                }
                 sessions.push(session);
             }
         }
@@ -84,7 +96,7 @@ impl CodexCollector {
                             }
                         }
                     }
-                    if let Some(session) = self.load_session(
+                    if let Some((session, rl)) = self.load_session_with_rate_limit(
                         None,
                         false,
                         &path,
@@ -92,6 +104,11 @@ impl CodexCollector {
                         &shared.children_map,
                         &shared.ports,
                     ) {
+                        if let Some(new_rl) = rl {
+                            let newer = self.last_rate_limit.as_ref()
+                                .map_or(true, |old| new_rl.updated_at > old.updated_at);
+                            if newer { self.last_rate_limit = Some(new_rl); }
+                        }
                         sessions.push(session);
                     }
                 }
@@ -112,7 +129,7 @@ impl CodexCollector {
         if dir.exists() { Some(dir) } else { None }
     }
 
-    fn load_session(
+    fn load_session_with_rate_limit(
         &self,
         pid: Option<u32>,
         is_exec: bool,
@@ -120,7 +137,7 @@ impl CodexCollector {
         process_info: &HashMap<u32, ProcInfo>,
         children_map: &HashMap<u32, Vec<u32>>,
         ports: &HashMap<u32, Vec<u16>>,
-    ) -> Option<AgentSession> {
+    ) -> Option<(AgentSession, Option<RateLimitInfo>)> {
         let result = parse_codex_jsonl(jsonl_path)?;
 
         let proc = pid.and_then(|p| process_info.get(&p));
@@ -200,10 +217,11 @@ impl CodexCollector {
             }
         }
 
-        // Git stats
-        let (git_added, git_modified) = process::collect_git_stats(&result.cwd);
+        // Git stats: populated by MultiCollector on slow ticks
+        let (git_added, git_modified) = (0, 0);
+        let rate_limit = result.rate_limit.clone();
 
-        Some(AgentSession {
+        Some((AgentSession {
             agent_cli: "codex",
             pid: display_pid,
             session_id: result.session_id,
@@ -231,37 +249,22 @@ impl CodexCollector {
             children,
             transcript_offset: 0,
             initial_prompt: result.initial_prompt,
-        })
+        }, rate_limit))
     }
 
-    /// Find PIDs of running codex processes (the native binary, not node wrapper).
+    /// Find PIDs of running codex processes from shared process data (no extra ps call).
     /// Returns (pid, is_exec) tuples — `is_exec` is true for one-shot `codex exec` runs.
-    fn find_codex_pids() -> Vec<(u32, bool)> {
-        let output = Command::new("ps")
-            .args(["-eo", "pid,command"])
-            .output()
-            .ok();
-
+    fn find_codex_pids_from_shared(process_info: &HashMap<u32, ProcInfo>) -> Vec<(u32, bool)> {
         let mut pids = Vec::new();
-        if let Some(output) = output {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            for line in stdout.lines().skip(1) {
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() >= 2 {
-                    let cmd = parts[1..].join(" ");
-                    // Match the native codex binary, skip app-server and node wrapper.
-                    // When invoked without subcommand, it defaults to interactive mode.
-                    let is_exec = cmd.contains(" exec");
-                    if cmd.contains("/codex")
-                        && !cmd.contains("app-server")
-                        && !cmd.contains("grep")
-                        && !cmd.starts_with("node ")
-                    {
-                        if let Ok(pid) = parts[0].trim().parse::<u32>() {
-                            pids.push((pid, is_exec));
-                        }
-                    }
-                }
+        for (pid, info) in process_info {
+            let cmd = &info.command;
+            let is_exec = cmd.contains(" exec");
+            if cmd.contains("/codex")
+                && !cmd.contains("app-server")
+                && !cmd.contains("grep")
+                && !cmd.starts_with("node ")
+            {
+                pids.push((*pid, is_exec));
             }
         }
         pids
@@ -325,6 +328,8 @@ struct CodexJSONLResult {
     total_cache_read: u64,
     last_context_tokens: u64,
     token_history: Vec<u64>,
+    /// Rate limit info from the latest token_count event.
+    rate_limit: Option<RateLimitInfo>,
 }
 
 /// Parse a Codex rollout-*.jsonl file.
@@ -360,6 +365,7 @@ fn parse_codex_jsonl(path: &Path) -> Option<CodexJSONLResult> {
         total_cache_read: 0,
         last_context_tokens: 0,
         token_history: Vec::new(),
+        rate_limit: None,
     };
 
     for line in reader.lines() {
@@ -450,6 +456,25 @@ fn parse_codex_jsonl(path: &Path) -> Option<CodexJSONLResult> {
                                 .unwrap_or(0);
                             result.last_context_tokens = inp + cache;
                             result.token_history.push(inp + out + cache);
+                        }
+                        // Rate limits: primary = 5h window, secondary = 7d window
+                        let rl = &info["rate_limits"];
+                        if rl.is_object() {
+                            let primary = &rl["primary"];
+                            let secondary = &rl["secondary"];
+                            // Use event timestamp so newer events always win;
+                            // leave updated_at unset if no timestamp is available.
+                            let event_secs = val["timestamp"].as_str()
+                                .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
+                                .map(|dt| dt.timestamp() as u64);
+                            result.rate_limit = Some(RateLimitInfo {
+                                source: "codex".to_string(),
+                                five_hour_pct: primary["used_percent"].as_f64(),
+                                five_hour_resets_at: primary["resets_at"].as_u64(),
+                                seven_day_pct: secondary["used_percent"].as_f64(),
+                                seven_day_resets_at: secondary["resets_at"].as_u64(),
+                                updated_at: event_secs,
+                            });
                         }
                     }
                     Some("agent_message") => {
