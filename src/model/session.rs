@@ -1,6 +1,23 @@
 use serde::Deserialize;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+/// Account-level rate limit info (shared across all sessions).
+#[derive(Debug, Clone, Default)]
+pub struct RateLimitInfo {
+    /// "claude" or "codex"
+    pub source: String,
+    /// 5-hour window usage percentage (0-100)
+    pub five_hour_pct: Option<f64>,
+    /// 5-hour window reset timestamp (epoch seconds)
+    pub five_hour_resets_at: Option<u64>,
+    /// 7-day window usage percentage (0-100)
+    pub seven_day_pct: Option<f64>,
+    /// 7-day window reset timestamp (epoch seconds)
+    pub seven_day_resets_at: Option<u64>,
+    /// When this data was last updated
+    pub updated_at: Option<u64>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum SessionStatus {
     Working,

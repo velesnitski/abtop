@@ -1,6 +1,8 @@
 pub mod claude;
+pub mod rate_limit;
 
 pub use claude::ClaudeCollector;
+pub use rate_limit::read_rate_limits;
 
 use crate::model::AgentSession;
 
