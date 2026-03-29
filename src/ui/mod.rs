@@ -315,7 +315,7 @@ fn draw_context_bars(f: &mut Frame, app: &App, area: Rect, cpu_grad: &[Color; 10
     let header_style = Style::default().fg(MAIN_FG).add_modifier(Modifier::BOLD);
 
     // bar width = remaining space after Project(14) + Session(9) + pct(5) + padding
-    let bar_width = (area.width as usize).saturating_sub(30).min(60).max(4);
+    let bar_width = (area.width as usize).saturating_sub(30).min(30).max(4);
 
     let mut rows = Vec::new();
 
