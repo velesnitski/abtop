@@ -72,9 +72,13 @@ impl MultiCollector {
         }
     }
 
-    /// Get the latest Codex rate limit info (parsed from JSONL token_count events).
-    pub fn codex_rate_limit(&self) -> Option<&crate::model::RateLimitInfo> {
-        self.codex.last_rate_limit.as_ref()
+    /// Get the latest Codex rate limit info.
+    /// Prefers live data from active sessions; falls back to cached file.
+    pub fn codex_rate_limit(&self) -> Option<crate::model::RateLimitInfo> {
+        if let Some(live) = &self.codex.last_rate_limit {
+            return Some(live.clone());
+        }
+        rate_limit::read_codex_cache()
     }
 
     pub fn collect(&mut self) -> Vec<AgentSession> {

@@ -1,10 +1,13 @@
 use crate::model::RateLimitInfo;
 use serde::Deserialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// File written by the StatusLine hook: ~/.claude/abtop-rate-limits.json
 const CLAUDE_RATE_FILE: &str = "abtop-rate-limits.json";
+
+/// Cached Codex rate limit: ~/.cache/abtop/codex-rate-limits.json
+const CODEX_CACHE_FILE: &str = "codex-rate-limits.json";
 
 #[derive(Debug, Deserialize)]
 struct RateLimitFile {
@@ -38,13 +41,49 @@ pub fn read_rate_limits() -> Vec<RateLimitInfo> {
         }
     }
 
-    // Codex: rate limits are parsed from JSONL token_count events by CodexCollector
-    // and merged in App::tick(). No file-based reading needed here.
-
     results
 }
 
-fn read_rate_file(path: &PathBuf, default_source: &str) -> Option<RateLimitInfo> {
+/// Read cached Codex rate limit (fallback when no live session provides one).
+pub fn read_codex_cache() -> Option<RateLimitInfo> {
+    let path = codex_cache_path()?;
+    read_rate_file(&path, "codex")
+}
+
+/// Write Codex rate limit to cache file (atomic: write temp + rename).
+pub fn write_codex_cache(info: &RateLimitInfo) {
+    let Some(path) = codex_cache_path() else { return };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    let json = format!(
+        r#"{{"source":"codex","five_hour":{},"seven_day":{},"updated_at":{}}}"#,
+        window_json(info.five_hour_pct, info.five_hour_resets_at),
+        window_json(info.seven_day_pct, info.seven_day_resets_at),
+        info.updated_at.map(|v| v.to_string()).unwrap_or_else(|| "null".to_string()),
+    );
+
+    // Atomic write: temp file + rename to avoid corrupted reads
+    let tmp = path.with_extension("tmp");
+    if std::fs::write(&tmp, &json).is_ok() {
+        let _ = std::fs::rename(&tmp, &path);
+    }
+}
+
+fn window_json(pct: Option<f64>, resets_at: Option<u64>) -> String {
+    match (pct, resets_at) {
+        (Some(p), Some(r)) => format!(r#"{{"used_percentage":{},"resets_at":{}}}"#, p, r),
+        (Some(p), None) => format!(r#"{{"used_percentage":{},"resets_at":0}}"#, p),
+        _ => "null".to_string(),
+    }
+}
+
+fn codex_cache_path() -> Option<PathBuf> {
+    dirs::cache_dir().map(|d| d.join("abtop").join(CODEX_CACHE_FILE))
+}
+
+fn read_rate_file(path: &Path, default_source: &str) -> Option<RateLimitInfo> {
     let content = std::fs::read_to_string(path).ok()?;
     let file: RateLimitFile = serde_json::from_str(&content).ok()?;
 

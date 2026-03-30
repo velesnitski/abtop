@@ -40,7 +40,7 @@ impl CodexCollector {
             return vec![];
         }
 
-        // Reset rate limit each pass — only keep it if a current session provides one
+        // Reset live rate limit each pass — only keep it if a current session provides one
         self.last_rate_limit = None;
 
         // Step 1: Find running codex processes from shared ps data (no extra ps call)
@@ -67,7 +67,10 @@ impl CodexCollector {
                 if let Some(new_rl) = rl {
                     let newer = self.last_rate_limit.as_ref()
                         .is_none_or(|old| new_rl.updated_at > old.updated_at);
-                    if newer { self.last_rate_limit = Some(new_rl); }
+                    if newer {
+                        super::rate_limit::write_codex_cache(&new_rl);
+                        self.last_rate_limit = Some(new_rl);
+                    }
                 }
                 sessions.push(session);
             }
@@ -107,7 +110,10 @@ impl CodexCollector {
                         if let Some(new_rl) = rl {
                             let newer = self.last_rate_limit.as_ref()
                                 .is_none_or(|old| new_rl.updated_at > old.updated_at);
-                            if newer { self.last_rate_limit = Some(new_rl); }
+                            if newer {
+                        super::rate_limit::write_codex_cache(&new_rl);
+                        self.last_rate_limit = Some(new_rl);
+                    }
                         }
                         sessions.push(session);
                     }
