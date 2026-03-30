@@ -66,7 +66,10 @@ impl ClaudeCollector {
 
         let proc_cmd = process_info.get(&sf.pid).map(|p| p.command.as_str());
         let pid_alive = proc_cmd
-            .map(|c| c.starts_with("claude") || c.contains("/claude"))
+            .map(|c| {
+                let bin = c.split_whitespace().next().unwrap_or("");
+                bin == "claude" || bin.ends_with("/claude")
+            })
             .unwrap_or(false);
 
         // Skip --print sessions (e.g. abtop's own summary generation).

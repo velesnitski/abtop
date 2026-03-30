@@ -270,10 +270,11 @@ impl CodexCollector {
         for (pid, info) in process_info {
             let cmd = &info.command;
             let is_exec = cmd.contains(" exec");
-            if cmd.contains("/codex")
+            let bin = cmd.split_whitespace().next().unwrap_or("");
+            let is_codex = bin == "codex" || bin.ends_with("/codex");
+            if is_codex
                 && !cmd.contains("app-server")
                 && !cmd.contains("grep")
-                && !cmd.starts_with("node ")
             {
                 pids.push((*pid, is_exec));
             }
