@@ -155,7 +155,6 @@ mod tests {
             mem_file_count: 0,
             mem_line_count: 0,
             children: Vec::new(),
-            transcript_offset: 0,
             initial_prompt: String::new(),
             first_assistant_text: String::new(),
         }
