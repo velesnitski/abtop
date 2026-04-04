@@ -8,7 +8,7 @@ const STATUSLINE_SCRIPT: &str = r#"#!/bin/bash
 # Reads JSON from stdin with a 5s timeout, pipes it to python via stdin
 # to avoid ARG_MAX limits on large payloads.
 INPUT=""
-while IFS= read -r -t 5 line; do
+while IFS= read -r -t 5 line || [ -n "$line" ]; do
     INPUT="${INPUT}${line}
 "
 done
