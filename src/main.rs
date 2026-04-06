@@ -165,6 +165,11 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, demo_mode: boo
     Ok(())
 }
 
+/// Strip control characters (including ANSI escapes) from a string for safe terminal output.
+fn sanitize_output(s: &str) -> String {
+    s.chars().filter(|c| !c.is_control() || *c == ' ').collect()
+}
+
 fn print_snapshot(app: &App) {
     println!("abtop — {} sessions\n", app.sessions.len());
     for session in &app.sessions {
@@ -179,11 +184,11 @@ fn print_snapshot(app: &App) {
             &session.session_id
         };
         let project_label = format!("{}({})", session.project_name, sid_short);
-        let summary = app.session_summary(session);
+        let summary = sanitize_output(&app.session_summary(session));
         println!(
             "  {} {:<20} {} {} {:<10} CTX:{:>3.0}% Tok:{} Mem:{}M {}",
             session.pid,
-            project_label,
+            sanitize_output(&project_label),
             summary,
             status,
             session.model.replace("claude-", ""),
@@ -193,14 +198,14 @@ fn print_snapshot(app: &App) {
             session.elapsed_display(),
         );
         if let Some(task) = session.current_tasks.last() {
-            println!("       └─ {}", task);
+            println!("       └─ {}", sanitize_output(task));
         }
         for child in &session.children {
             let port = child.port.map(|p| format!(":{}", p)).unwrap_or_default();
             println!(
                 "       {} {} {}K {}",
                 child.pid,
-                child.command.split_whitespace().take(3).collect::<Vec<_>>().join(" "),
+                sanitize_output(&child.command.split_whitespace().take(3).collect::<Vec<_>>().join(" ")),
                 child.mem_kb / 1024,
                 port,
             );
@@ -212,10 +217,38 @@ fn run_update() -> io::Result<()> {
     let current = env!("CARGO_PKG_VERSION");
     println!("abtop v{current} — checking for updates...\n");
 
-    let status = std::process::Command::new("sh")
-        .arg("-c")
-        .arg("curl --proto '=https' --tlsv1.2 -LsSf https://github.com/graykode/abtop/releases/latest/download/abtop-installer.sh | sh")
+    // Download installer to a temporary file before executing (avoid curl|sh pipe)
+    let tmp_dir = std::env::temp_dir();
+    let installer = tmp_dir.join("abtop-installer.sh");
+
+    let dl_status = std::process::Command::new("curl")
+        .args([
+            "--proto", "=https",
+            "--tlsv1.2",
+            "-LsSf",
+            "https://github.com/graykode/abtop/releases/latest/download/abtop-installer.sh",
+            "-o",
+        ])
+        .arg(&installer)
         .status()?;
+
+    if !dl_status.success() {
+        eprintln!("\nDownload failed. You can also update manually:");
+        eprintln!("  cargo install abtop --force");
+        std::process::exit(1);
+    }
+
+    // Show checksum so the user can verify if desired
+    let _ = std::process::Command::new("sha256sum")
+        .arg(&installer)
+        .status();
+
+    let status = std::process::Command::new("sh")
+        .arg(&installer)
+        .status()?;
+
+    // Clean up
+    let _ = std::fs::remove_file(&installer);
 
     if !status.success() {
         eprintln!("\nUpdate failed. You can also update manually:");

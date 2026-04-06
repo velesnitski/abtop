@@ -81,6 +81,10 @@ impl CodexCollector {
         if let Some(recent_dir) = Self::today_session_dir(&self.sessions_dir) {
             if let Ok(entries) = fs::read_dir(&recent_dir) {
                 for entry in entries.flatten() {
+                    // Skip symlinks to avoid reading unintended files
+                    if entry.file_type().map(|ft| ft.is_symlink()).unwrap_or(true) {
+                        continue;
+                    }
                     let path = entry.path();
                     if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
                         continue;
@@ -211,7 +215,11 @@ impl CodexCollector {
                 .get(&p)
                 .cloned()
                 .unwrap_or_default();
+            let mut visited = std::collections::HashSet::new();
             while let Some(cpid) = stack.pop() {
+                if !visited.insert(cpid) {
+                    continue;
+                }
                 if let Some(cproc) = process_info.get(&cpid) {
                     let port = ports.get(&cpid).and_then(|v| v.first().copied());
                     children.push(ChildProcess {
