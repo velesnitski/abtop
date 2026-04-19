@@ -72,7 +72,12 @@ impl ClaudeCollector {
     }
 
     fn collect_sessions(&mut self, shared: &super::SharedProcessData) -> Vec<AgentSession> {
-        self.refresh_config_dirs(&shared.process_info);
+        // Refresh config dirs on slow ticks only (every ~10s) or on first run.
+        // Scanning /proc/<pid>/environ for every Claude process is expensive
+        // to do every 2s; config dirs change rarely.
+        if shared.slow_tick || self.config_dirs.is_empty() {
+            self.refresh_config_dirs(&shared.process_info);
+        }
 
         // Collect all session file paths first to avoid borrowing self
         // immutably (config_dirs) and mutably (load_session) at the same time.
@@ -93,9 +98,12 @@ impl ClaudeCollector {
         }
 
         let mut sessions = Vec::new();
+        let mut seen_ids = std::collections::HashSet::new();
         for path in &session_paths {
             if let Some(session) = self.load_session(path, &shared.process_info, &shared.children_map, &shared.ports) {
-                sessions.push(session);
+                if seen_ids.insert(session.session_id.clone()) {
+                    sessions.push(session);
+                }
             }
         }
 
@@ -519,6 +527,12 @@ impl ClaudeCollector {
 impl super::AgentCollector for ClaudeCollector {
     fn collect(&mut self, shared: &super::SharedProcessData) -> Vec<AgentSession> {
         self.collect_sessions(shared)
+    }
+
+    fn discovered_config_dirs(&self) -> Vec<PathBuf> {
+        self.config_dirs.iter()
+            .map(|c| c.sessions_dir.parent().unwrap_or(Path::new(".")).to_path_buf())
+            .collect()
     }
 }
 
