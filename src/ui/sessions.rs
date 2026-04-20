@@ -189,9 +189,12 @@ pub(crate) fn draw_sessions_panel(f: &mut Frame, app: &App, area: Rect, theme: &
         if app.tree_view && !session.subagents.is_empty() {
             for (sa_idx, sa) in session.subagents.iter().enumerate() {
                 let is_last = sa_idx == session.subagents.len() - 1;
-                let prefix = if is_last { "    └─" } else { "    ├─" };
-                let icon = if sa.status == "working" { "●" } else { "✓" };
-                let sa_fg = if sa.status == "working" { theme.proc_misc } else { theme.inactive_fg };
+                // Tree connector fits the 3-wide agent column (was truncated before).
+                let prefix = if is_last { "└─" } else { "├─" };
+                let is_working = sa.status.eq_ignore_ascii_case("working")
+                    || sa.status.eq_ignore_ascii_case("in_progress");
+                let icon = if is_working { "●" } else { "✓" };
+                let sa_fg = if is_working { theme.proc_misc } else { theme.inactive_fg };
 
                 let mut sa_cells: Vec<Cell> = vec![
                     Cell::from(""),
